@@ -336,7 +336,7 @@ export default function ReportesPage() {
                 { lbl: "Ocupadas",    val: habOcupadas,    max: habTotal, color: "var(--red)"   },
                 { lbl: "Disponibles", val: habDisponibles, max: habTotal, color: "var(--green)" },
                 { lbl: "En limpieza", val: habLimpieza,    max: habTotal, color: "var(--amber)" },
-                { lbl: "Reservadas",  val: habReservadas,  max: habTotal, color: "var(--blue)"  },
+                { lbl: "Llegan hoy",  val: habReservadas,  max: habTotal, color: "var(--blue)"  },
               ].map((item) => (
                 <div key={item.lbl} style={{ marginBottom: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>

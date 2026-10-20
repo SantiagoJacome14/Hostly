@@ -1,14 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useReservas } from "../hooks/useReservas.jsx";
 import { useHabitaciones } from "../hooks/useHabitaciones.jsx";
 import { useAuth } from "../context/AuthContext";
-import {
-  crearReserva,
-  actualizarReserva,
-  actualizarHabitacion,
-  crearCliente,
-} from "../firebase/firestore";
+import { crearReserva, cancelarReserva, hacerCheckin } from "../firebase/firestore";
 import { useToast } from "../hooks/useToast.jsx";
+import { contarNoches, habitacionesLibres, hoyISO } from "../utils/disponibilidad";
 
 const initials = (n) =>
   n?.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "??";
@@ -29,10 +26,17 @@ const badgeLabel = {
   cancelada:  "Cancelada",
 };
 
-const calcNight = (ci, co) => {
-  if (!ci || !co) return 0;
-  const diff = new Date(co) - new Date(ci);
-  return Math.max(0, Math.round(diff / 86400000));
+const calcNight = contarNoches;
+
+const FORM_VACIO = {
+  nombre:     "",
+  documento:  "",
+  email:      "",
+  telefono:   "",
+  habitacion: "",
+  checkin:    "",
+  checkout:   "",
+  huespedes:  "2",
 };
 
 const fmtMoney = (n) =>
@@ -42,27 +46,36 @@ const fmtMoney = (n) =>
 
 export default function ReservasPage() {
   const { reservas, loading } = useReservas();
-  const { habitaciones } = useHabitaciones();
+  const { habitaciones, loading: cargandoHabs } = useHabitaciones();
   const { usuario } = useAuth();
   const { toast, ToastContainer } = useToast();
 
+  const [params, setParams] = useSearchParams();
   const [modal, setModal] = useState(false);
   const [filtro, setFiltro] = useState("todas");
   const [confirmarCancelar, setConfirmarCancelar] = useState(null); // reserva a cancelar
   const [errFecha, setErrFecha] = useState("");
+  const [guardando, setGuardando] = useState(false);
 
-  const [form, setForm] = useState({
-    nombre:     "",
-    documento:  "",
-    email:      "",
-    telefono:   "",
-    habitacion: "",
-    checkin:    "",
-    checkout:   "",
-    huespedes:  "2",
-  });
+  const [form, setForm] = useState(FORM_VACIO);
 
-  const disponibles = habitaciones.filter((h) => h.estado === "disponible");
+  // Abrir el formulario desde el calendario o el botón "Nueva reserva"
+  // (?nueva=1&hab=101&ci=2026-10-20&co=2026-10-22)
+  useEffect(() => {
+    if (!params.get("nueva")) return;
+    setForm({
+      ...FORM_VACIO,
+      habitacion: params.get("hab") || "",
+      checkin: params.get("ci") || "",
+      checkout: params.get("co") || "",
+    });
+    setErrFecha("");
+    setModal(true);
+    setParams({}, { replace: true });
+  }, [params, setParams]);
+
+  // Solo se ofrecen habitaciones libres en TODAS las noches elegidas
+  const disponibles = habitacionesLibres(habitaciones, reservas, form.checkin, form.checkout);
 
   const habSeleccionada = disponibles.find((h) => h.numero === form.habitacion);
   const noches = calcNight(form.checkin, form.checkout);
@@ -73,10 +86,15 @@ export default function ReservasPage() {
     const ci = campo === "checkin"  ? valor : form.checkin;
     const co = campo === "checkout" ? valor : form.checkout;
 
-    if (ci && co && new Date(co) <= new Date(ci)) {
+    if (ci && co && co <= ci) {
       setErrFecha("La fecha de salida debe ser posterior a la de entrada.");
     } else {
       setErrFecha("");
+    }
+    // Si la habitación elegida deja de estar libre con las nuevas fechas, se quita
+    const libres = habitacionesLibres(habitaciones, reservas, ci, co);
+    if (nuevoForm.habitacion && !libres.some((h) => h.numero === nuevoForm.habitacion)) {
+      nuevoForm.habitacion = "";
     }
     setForm(nuevoForm);
   };
@@ -84,60 +102,48 @@ export default function ReservasPage() {
   const handleCrear = async (e) => {
     e.preventDefault();
 
-    if (form.checkout && form.checkin && new Date(form.checkout) <= new Date(form.checkin)) {
+    if (form.checkout && form.checkin && form.checkout <= form.checkin) {
       setErrFecha("La fecha de salida debe ser posterior a la de entrada.");
       return;
     }
 
+    setGuardando(true);
     try {
       const habObj = habitaciones.find((h) => h.numero === form.habitacion);
 
-      await crearReserva({
-        ...form,
-        noches,
-        precioNoche: habObj?.precio || 0,
-        total: totalEstimado,
-        estado: "confirmada",
-        creadoPor: usuario?.email || "sistema",
-      });
-
-      if (habObj) {
-        await actualizarHabitacion(habObj.id, { estado: "reservada" });
-      }
-
-      await crearCliente({
-        nombre:    form.nombre,
-        documento: form.documento,
-        email:     form.email,
-        habitacion: form.habitacion,
-      });
+      await crearReserva(
+        {
+          ...form,
+          huespedes: Number(form.huespedes) || 1,
+          precioNoche: habObj?.precio || 0,
+          total: totalEstimado,
+        },
+        usuario
+      );
 
       toast(`Reserva creada para ${form.nombre} ✓`);
 
       setModal(false);
       setErrFecha("");
-      setForm({ nombre: "", documento: "", email: "", telefono: "", habitacion: "", checkin: "", checkout: "", huespedes: "2" });
+      setForm(FORM_VACIO);
     } catch (error) {
       console.error(error);
-      toast("Error al crear reserva");
+      if (error.message === "OCUPADA") {
+        toast(`La habitación ${form.habitacion} ya está ocupada la noche del ${error.noche}. Elige otra.`);
+        setForm((f) => ({ ...f, habitacion: "" }));
+      } else {
+        toast("Error al crear reserva");
+      }
+    } finally {
+      setGuardando(false);
     }
   };
 
   const handleCancelar = async () => {
     if (!confirmarCancelar) return;
     try {
-      await actualizarReserva(confirmarCancelar.id, {
-        estado: "cancelada",
-        canceladaEn: new Date().toISOString(),
-        canceladaPor: usuario?.email || "sistema",
-      });
-      // Si la habitación estaba reservada por esta reserva, liberar
-      if (confirmarCancelar.estado === "confirmada" || confirmarCancelar.estado === "pendiente") {
-        const hab = habitaciones.find((h) => h.numero === confirmarCancelar.habitacion);
-        if (hab && hab.estado === "reservada") {
-          await actualizarHabitacion(hab.id, { estado: "disponible" });
-        }
-      }
+      // Libera las noches de la reserva en el calendario
+      await cancelarReserva(confirmarCancelar, usuario);
       toast(`Reserva de ${confirmarCancelar.nombre} cancelada`);
     } catch (err) {
       console.error(err);
@@ -148,9 +154,10 @@ export default function ReservasPage() {
   };
 
   const filtros = ["todas", "confirmada", "pendiente", "checkin", "checkout", "cancelada"];
-  const filtradas = reservas.filter(
-    (r) => filtro === "todas" || r.estado === filtro
-  );
+  const creada = (r) => r.creadaEn?.toMillis?.() || 0;
+  const filtradas = reservas
+    .filter((r) => filtro === "todas" || r.estado === filtro)
+    .sort((a, b) => creada(b) - creada(a));
 
   return (
     <>
@@ -252,6 +259,7 @@ export default function ReservasPage() {
                       className="form-input"
                       type="date"
                       required
+                      min={hoyISO()}
                       value={form.checkin}
                       onChange={(e) => handleFechaChange("checkin", e.target.value)}
                     />
@@ -299,7 +307,15 @@ export default function ReservasPage() {
                       value={form.habitacion}
                       onChange={(e) => setForm({ ...form, habitacion: e.target.value })}
                     >
-                      <option value="">Seleccionar...</option>
+                      <option value="">
+                        {!form.checkin || !form.checkout
+                          ? "Elige primero las fechas"
+                          : cargandoHabs
+                          ? "Cargando habitaciones..."
+                          : disponibles.length
+                          ? "Seleccionar..."
+                          : "No hay habitaciones libres en esas fechas"}
+                      </option>
                       {disponibles.map((h) => (
                         <option key={h.id} value={h.numero}>
                           {h.numero} – {h.tipo} · {fmtMoney(h.precio)}/noche
@@ -350,8 +366,8 @@ export default function ReservasPage() {
                 <button type="button" className="btn btn-outline btn-sm" onClick={() => setModal(false)}>
                   Cancelar
                 </button>
-                <button type="submit" className="btn btn-gold btn-sm" disabled={!!errFecha}>
-                  Confirmar reserva
+                <button type="submit" className="btn btn-gold btn-sm" disabled={!!errFecha || guardando}>
+                  {guardando ? "Guardando..." : "Confirmar reserva"}
                 </button>
               </div>
             </form>
@@ -445,11 +461,17 @@ export default function ReservasPage() {
                       {(r.estado === "confirmada" || r.estado === "pendiente") && (
                         <button
                           className="btn btn-ghost btn-sm"
+                          disabled={r.checkin > hoyISO()}
+                          title={r.checkin > hoyISO() ? `Llega el ${r.checkin}` : "Hacer check-in"}
                           onClick={async () => {
-                            await actualizarReserva(r.id, { estado: "checkin" });
                             const hab = habitaciones.find((h) => h.numero === r.habitacion);
-                            if (hab) await actualizarHabitacion(hab.id, { estado: "ocupada", huesped: r.nombre });
-                            toast("Check-in realizado ✓");
+                            try {
+                              await hacerCheckin(r, hab, usuario);
+                              toast("Check-in realizado ✓");
+                            } catch (err) {
+                              console.error(err);
+                              toast("Error al hacer check-in");
+                            }
                           }}
                         >
                           Check-in

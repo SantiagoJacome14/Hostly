@@ -1,21 +1,36 @@
 import { useReservas } from "../hooks/useReservas.jsx";
 import { useHabitaciones } from "../hooks/useHabitaciones.jsx";
-import { actualizarReserva, actualizarHabitacion } from "../firebase/firestore";
+import { useAuth } from "../context/AuthContext";
+import { hacerCheckin } from "../firebase/firestore";
 import { useToast } from "../hooks/useToast.jsx";
+import { hoyISO } from "../utils/disponibilidad";
 
 const initials = (n) => n?.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "??";
 
 export default function CheckinPage() {
   const { reservas } = useReservas();
   const { habitaciones } = useHabitaciones();
+  const { usuario } = useAuth();
   const { toast, ToastContainer } = useToast();
-  const pendientes = reservas.filter((r) => r.estado === "confirmada" || r.estado === "pendiente");
+  const hoy = hoyISO();
+  // Primero las llegadas de hoy (o atrasadas), luego las futuras
+  const pendientes = reservas
+    .filter((r) => r.estado === "confirmada" || r.estado === "pendiente")
+    .sort((a, b) => a.checkin.localeCompare(b.checkin));
 
   const doCheckin = async (res) => {
-    await actualizarReserva(res.id, { estado: "checkin" });
     const hab = habitaciones.find((h) => h.numero === res.habitacion);
-    if (hab) await actualizarHabitacion(hab.id, { estado: "ocupada", huesped: res.nombre });
-    toast(`✓ Check-in completado — ${res.nombre}, Hab. ${res.habitacion}`);
+    if (hab && hab.estadoFisico === "ocupada") {
+      toast(`La habitación ${res.habitacion} todavía figura ocupada (${hab.huesped || "otro huésped"}). Haz primero su check-out.`);
+      return;
+    }
+    try {
+      await hacerCheckin(res, hab, usuario);
+      toast(`✓ Check-in completado — ${res.nombre}, Hab. ${res.habitacion}`);
+    } catch (err) {
+      console.error(err);
+      toast("Error al hacer check-in");
+    }
   };
 
   return (
@@ -41,7 +56,11 @@ export default function CheckinPage() {
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                 <span className={`badge ${r.estado === "confirmada" ? "b-green" : "b-amber"}`}>{r.estado}</span>
-                <button className="btn btn-gold btn-sm" onClick={() => doCheckin(r)}>Hacer check-in</button>
+                {r.checkin > hoy ? (
+                  <span style={{ fontSize:11, color:"var(--muted)" }}>Llega el {r.checkin}</span>
+                ) : (
+                  <button className="btn btn-gold btn-sm" onClick={() => doCheckin(r)}>Hacer check-in</button>
+                )}
               </div>
             </div>
           ))}

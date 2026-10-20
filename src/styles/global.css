@@ -75,3 +75,4 @@ input[type="number"] { -moz-appearance: textfield; }
 .modal-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px; line-height: 1; padding: 4px; }
 .modal-close:hover { color: var(--text); }
 .modal-body { padding: 20px 24px; } .modal-footer { padding: 14px 24px; border-top: 1px solid rgba(255,255,255,0.05); display: flex; gap: 10px; justify-content: flex-end; }
+.room-cell.mantenimiento { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12); } .room-cell.mantenimiento .room-num { color: var(--muted); }

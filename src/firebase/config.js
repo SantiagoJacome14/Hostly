@@ -1,20 +1,34 @@
-// ⚠️ REEMPLAZA con tu configuración de Firebase Console
-// Pasos: console.firebase.google.com → Proyecto → Config de app web
+// ==========================================
+// HOSTLY — Conexión con Firebase
+// Los valores vienen del archivo .env (ver .env.example y la guía de Firebase)
+// ==========================================
 
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
+import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { getAuth, connectAuthEmulator } from "firebase/auth";
 
-const firebaseConfig = {
-   apiKey: "AIzaSyCurtYO0HvNXXLL5BqZ_yx3-AyZfepzGBY",
-  authDomain: "hostly-9e4fc.firebaseapp.com",
-  projectId: "hostly-9e4fc",
-  storageBucket: "hostly-9e4fc.firebasestorage.app",
-  messagingSenderId: "867372364502",
-  appId: "1:867372364502:web:dfc1fc59b7b7ee50578f77",
+export const firebaseConfig = {
+  apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket:     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId:             import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
-export const auth = getAuth(app);
+// true si el .env tiene al menos la clave y el proyecto
+export const firebaseConfigurado = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
+
+const app = firebaseConfigurado ? initializeApp(firebaseConfig) : null;
+export const db = app ? getFirestore(app) : null;
+export const auth = app ? getAuth(app) : null;
+
+// Para probar sin tocar datos reales: VITE_USAR_EMULADOR=true y `npx firebase emulators:start`
+export const usarEmulador = import.meta.env.VITE_USAR_EMULADOR === "true";
+export const URL_EMULADOR_AUTH = "http://127.0.0.1:9099";
+
+if (app && usarEmulador) {
+  connectFirestoreEmulator(db, "127.0.0.1", 8080);
+  connectAuthEmulator(auth, URL_EMULADOR_AUTH, { disableWarnings: true });
+}
 export default app;

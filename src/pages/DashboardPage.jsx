@@ -133,7 +133,7 @@ function AdminPanel() {
         <StatCard lbl="Ocupación" val={`${pct}%`} color="var(--gold)" prog={pct} />
         <StatCard lbl="Disponibles" val={disponibles} sub={`De ${total} habitaciones`} color="var(--green)" />
         <StatCard lbl="En limpieza" val={limpieza} sub="Pendientes" color="var(--amber)" />
-        <StatCard lbl="Reservadas" val={reservadas} sub="Sin check-in" color="var(--blue)" />
+        <StatCard lbl="Llegan hoy" val={reservadas} sub="Pendientes de check-in" color="var(--blue)" />
       </div>
 
       {/* Reservas */}

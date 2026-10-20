@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
-import { db } from "../firebase/config";
-import { crearEmpleado } from "../firebase/auth";
+import { crearEmpleado, actualizarEmpleado } from "../firebase/auth";
+import { suscribirEmpleados } from "../firebase/firestore";
+import { useAuth } from "../context/AuthContext";
 import { useToast } from "../hooks/useToast.jsx";
 
 const ROLES = ["recepcionista", "contador", "servicio", "vigilante", "admin"];
@@ -16,15 +16,17 @@ export default function UsuariosPage() {
   const [modal, setModal]         = useState(false);
   const [creando, setCreando]     = useState(false);
   const { toast, ToastContainer } = useToast();
+  const { usuario, hotelId } = useAuth();
+  const [editando, setEditando]   = useState(null);
+  const [formEdit, setFormEdit]   = useState({ nombre: "", rol: "recepcionista", area: "" });
 
   const [form, setForm] = useState({
     nombre: "", email: "", password: "", rol: "recepcionista", area: "",
   });
 
   useEffect(() => {
-    const q = query(collection(db, "empleados"), orderBy("creadoEn", "desc"));
-    const unsub = onSnapshot(q, (snap) => {
-      setEmpleados(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    const unsub = suscribirEmpleados((data) => {
+      setEmpleados(data);
       setLoading(false);
     });
     return () => unsub();
@@ -34,7 +36,8 @@ export default function UsuariosPage() {
     ev.preventDefault();
     setCreando(true);
     try {
-      await crearEmpleado(form.email, form.password, form.rol, form.nombre, form.area);
+      // Se crea en segundo plano: tu sesión de administrador sigue abierta
+      await crearEmpleado({ ...form, hotelId });
       toast(`Empleado ${form.nombre} creado con rol ${form.rol} ✓`);
       setModal(false);
       setForm({ nombre: "", email: "", password: "", rol: "recepcionista", area: "" });
@@ -52,9 +55,77 @@ export default function UsuariosPage() {
     }
   };
 
+  const abrirEditar = (e) => {
+    setFormEdit({ nombre: e.nombre || "", rol: e.rol, area: e.area || "" });
+    setEditando(e);
+  };
+
+  const handleEditar = async (ev) => {
+    ev.preventDefault();
+    try {
+      await actualizarEmpleado(editando.id, formEdit);
+      toast("Empleado actualizado ✓");
+      setEditando(null);
+    } catch (err) {
+      console.error(err);
+      toast("No se pudo actualizar el empleado");
+    }
+  };
+
+  const cambiarActivo = async (e) => {
+    const activo = e.activo === false;
+    try {
+      await actualizarEmpleado(e.id, { activo });
+      toast(activo ? `${e.nombre} puede volver a ingresar` : `${e.nombre} ya no puede ingresar`);
+    } catch (err) {
+      console.error(err);
+      toast("No se pudo cambiar el acceso");
+    }
+  };
+
+  const esYo = (e) => e.id === usuario?.uid;
+
   return (
     <>
       <ToastContainer />
+
+      {editando && (
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setEditando(null)}>
+          <div className="modal">
+            <div className="modal-header">
+              <div className="modal-title">Editar empleado</div>
+              <button className="modal-close" onClick={() => setEditando(null)}>✕</button>
+            </div>
+            <form onSubmit={handleEditar}>
+              <div className="modal-body">
+                <div className="form-group">
+                  <label className="form-label">Nombre completo</label>
+                  <input className="form-input" required value={formEdit.nombre} onChange={(e) => setFormEdit({ ...formEdit, nombre: e.target.value })} />
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Rol</label>
+                    <select className="form-input form-select" value={formEdit.rol} disabled={esYo(editando)} onChange={(e) => setFormEdit({ ...formEdit, rol: e.target.value })}>
+                      {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Área / Turno</label>
+                    <input className="form-input" value={formEdit.area} onChange={(e) => setFormEdit({ ...formEdit, area: e.target.value })} />
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                  Para cambiar la contraseña, el empleado usa "¿Olvidaste tu contraseña?" en la pantalla de ingreso.
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditando(null)}>Cancelar</button>
+                <button type="submit" className="btn btn-gold btn-sm">Guardar</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {modal && (
         <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setModal(false)}>
@@ -133,11 +204,11 @@ export default function UsuariosPage() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Nombre</th><th>Email</th><th>Rol</th><th>Área</th><th>Creado</th></tr>
+              <tr><th>Nombre</th><th>Email</th><th>Rol</th><th>Área</th><th>Creado</th><th>Acceso</th><th></th></tr>
             </thead>
             <tbody>
               {empleados.map((e) => (
-                <tr key={e.id}>
+                <tr key={e.id} style={{ opacity: e.activo === false ? 0.5 : 1 }}>
                   <td style={{ fontWeight: 500 }}>{e.nombre || "—"}</td>
                   <td style={{ fontSize: 12, color: "var(--muted)" }}>{e.email}</td>
                   <td>
@@ -153,6 +224,19 @@ export default function UsuariosPage() {
                   <td style={{ fontSize: 12, color: "var(--muted)" }}>{e.area || "—"}</td>
                   <td style={{ fontSize: 11, color: "var(--muted)" }}>
                     {e.creadoEn?.toDate?.()?.toLocaleDateString("es-CO") || "—"}
+                  </td>
+                  <td>
+                    <span className={`badge ${e.activo === false ? "b-gray" : "b-green"}`}>
+                      {e.activo === false ? "Desactivado" : "Activo"}
+                    </span>
+                  </td>
+                  <td style={{ display: "flex", gap: 6 }}>
+                    <button className="btn btn-ghost btn-sm" onClick={() => abrirEditar(e)}>Editar</button>
+                    {!esYo(e) && (
+                      <button className="btn btn-outline btn-sm" onClick={() => cambiarActivo(e)}>
+                        {e.activo === false ? "Activar" : "Desactivar"}
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

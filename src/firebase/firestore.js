@@ -1,457 +1,428 @@
 // ==========================================
 // HOSTLY — Servicios de Firestore (tiempo real)
-// Cada función maneja una colección de la BD
+// Todos los datos viven bajo hoteles/{hotelId}/… para que cada hotel
+// vea solo lo suyo. El hotel actual lo fija AuthContext al iniciar sesión.
 // ==========================================
 
 import {
   collection,
-  addDoc,
-  updateDoc,
-  deleteDoc,
   doc,
   getDoc,
-  getDocs,
   onSnapshot,
   query,
+  where,
   orderBy,
   serverTimestamp,
-  setDoc,
   limit,
+  increment,
+  runTransaction,
+  setDoc,
+  updateDoc,
   writeBatch,
+  Timestamp,
 } from "firebase/firestore";
 import { db } from "./config";
+import { nochesDeEstancia, hoyISO, sumarDias } from "../utils/disponibilidad";
 
-// ─── RESERVAS ──────────────────────────────────────────
-export const suscribirReservas = (callback) => {
-  const q = query(
-    collection(db, "reservas"),
-    orderBy("creadaEn", "desc")
+// ─── HOTEL ACTUAL ──────────────────────────────────────
+let hotelActual = null;
+
+export const setHotelActual = (id) => {
+  hotelActual = id || null;
+};
+
+const hotelId = () => {
+  if (!hotelActual) throw new Error("No hay un hotel activo en la sesión");
+  return hotelActual;
+};
+
+const col = (nombre) => collection(db, "hoteles", hotelId(), nombre);
+const ref = (nombre, id) => doc(db, "hoteles", hotelId(), nombre, id);
+const nuevoRef = (nombre) => doc(col(nombre));
+
+/** Crea un documento con id automático y devuelve su referencia. */
+const crear = async (nombre, datos) => {
+  const r = nuevoRef(nombre);
+  await setDoc(r, datos);
+  return r;
+};
+
+const escuchar = (q, callback) =>
+  onSnapshot(
+    q,
+    (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (err) => console.error("Firestore:", err.code, err.message)
   );
 
-  return onSnapshot(q, (snap) => {
-    const data = snap.docs.map((d) => ({
-      id: d.id,
-      ...d.data(),
-    }));
+/** Timestamp de hace N días, para no descargar colecciones completas. */
+const haceDias = (dias) => Timestamp.fromDate(new Date(Date.now() - dias * 86400000));
 
-    callback(data);
+/** Id del documento de ocupación de una habitación en una noche. */
+const ocupacionId = (habitacion, noche) => `${habitacion}_${noche}`;
+
+/** Id estable del cliente a partir de su documento (evita duplicados). */
+export const clienteId = (documento) =>
+  String(documento || "").toUpperCase().replace(/[^0-9A-Z]/g, "");
+
+const quien = (usuario) => usuario?.email || "sistema";
+
+// ─── HOTEL ─────────────────────────────────────────────
+export const actualizarHotel = (datos) =>
+  updateDoc(doc(db, "hoteles", hotelId()), { ...datos, actualizadoEn: serverTimestamp() });
+
+// ─── RESERVAS ──────────────────────────────────────────
+// Reservas que salen desde hace 180 días en adelante (las anteriores están en Historial)
+export const suscribirReservas = (callback, dias = 180) =>
+  escuchar(
+    query(col("reservas"), where("checkout", ">=", sumarDias(hoyISO(), -dias)), orderBy("checkout", "desc")),
+    callback
+  );
+
+/**
+ * Crea una reserva bloqueando cada noche de la habitación.
+ * Si otra reserva ya tomó alguna de esas noches (aunque la hayan creado
+ * en otro computador al mismo tiempo), falla con error "OCUPADA".
+ */
+export const crearReserva = async (datos, usuario) => {
+  const noches = nochesDeEstancia(datos.checkin, datos.checkout);
+  if (!noches.length) throw new Error("FECHAS");
+
+  const reservaRef = nuevoRef("reservas");
+  const ocupRefs = noches.map((n) => ref("ocupacion", ocupacionId(datos.habitacion, n)));
+  const idCliente = clienteId(datos.documento);
+  const clienteRef = idCliente ? ref("clientes", idCliente) : null;
+
+  await runTransaction(db, async (tx) => {
+    const snaps = await Promise.all(ocupRefs.map((r) => tx.get(r)));
+    const tomada = snaps.find((s) => s.exists());
+    if (tomada) {
+      const err = new Error("OCUPADA");
+      err.noche = tomada.data().fecha;
+      throw err;
+    }
+    const clienteSnap = clienteRef ? await tx.get(clienteRef) : null;
+
+    tx.set(reservaRef, {
+      ...datos,
+      clienteId: idCliente || null,
+      noches: noches.length,
+      estado: "confirmada",
+      creadoPor: quien(usuario),
+      creadaEn: serverTimestamp(),
+    });
+    noches.forEach((noche, i) =>
+      tx.set(ocupRefs[i], { reservaId: reservaRef.id, habitacion: datos.habitacion, fecha: noche })
+    );
+    if (clienteRef) {
+      tx.set(
+        clienteRef,
+        {
+          nombre: datos.nombre,
+          documento: datos.documento,
+          email: datos.email || "",
+          telefono: datos.telefono || "",
+          habitacion: datos.habitacion,
+          ultimaReserva: reservaRef.id,
+          actualizadoEn: serverTimestamp(),
+          ...(clienteSnap?.exists() ? {} : { creadoEn: serverTimestamp(), visitas: 0 }),
+        },
+        { merge: true }
+      );
+    }
   });
+  return reservaRef;
 };
 
-export const crearReserva = async (datos) => {
-  return await addDoc(collection(db, "reservas"), {
-    ...datos,
-    estado: "pendiente",
-    creadaEn: serverTimestamp(),
+/** Libera las noches de una reserva desde `desde` (incluida) hasta su checkout. */
+const liberarNoches = (batch, reserva, desde = null) => {
+  nochesDeEstancia(reserva.checkin, reserva.checkout)
+    .filter((n) => !desde || n >= desde)
+    .forEach((n) => batch.delete(ref("ocupacion", ocupacionId(reserva.habitacion, n))));
+};
+
+export const cancelarReserva = async (reserva, usuario) => {
+  const batch = writeBatch(db);
+  batch.update(ref("reservas", reserva.id), {
+    estado: "cancelada",
+    canceladaEn: new Date().toISOString(),
+    canceladaPor: quien(usuario),
   });
+  liberarNoches(batch, reserva);
+  await batch.commit();
 };
 
-export const actualizarReserva = async (id, datos) => {
-  return await updateDoc(doc(db, "reservas", id), datos);
+export const hacerCheckin = async (reserva, habitacion, usuario) => {
+  const batch = writeBatch(db);
+  batch.update(ref("reservas", reserva.id), {
+    estado: "checkin",
+    checkinPor: quien(usuario),
+    checkinEn: serverTimestamp(),
+  });
+  if (habitacion) {
+    batch.update(ref("habitaciones", habitacion.id), { estado: "ocupada", huesped: reserva.nombre });
+  }
+  await batch.commit();
 };
 
-export const eliminarReserva = async (id) => {
-  return await deleteDoc(doc(db, "reservas", id));
+/**
+ * Check-out en una sola operación: reserva, habitación, historial, ingreso,
+ * visitas del cliente y liberación de las noches que no se usaron.
+ * O se guarda todo, o no se guarda nada.
+ */
+export const hacerCheckout = async (reserva, habitacion, pago, usuario) => {
+  const batch = writeBatch(db);
+  const montoFinal = Number(pago.monto) || 0;
+  const noches = reserva.noches || nochesDeEstancia(reserva.checkin, reserva.checkout).length;
+
+  batch.update(ref("reservas", reserva.id), {
+    estado: "checkout",
+    checkoutPor: quien(usuario),
+    checkoutEn: serverTimestamp(),
+    metodoPago: pago.metodo,
+    montoPagado: montoFinal,
+    observacionCheckout: pago.observacion || "",
+  });
+
+  if (habitacion) {
+    batch.update(ref("habitaciones", habitacion.id), { estado: pago.estadoHab, huesped: null });
+  }
+
+  batch.set(nuevoRef("historial_estancias"), {
+    reservaId: reserva.id,
+    nombre: reserva.nombre,
+    documento: reserva.documento || "",
+    email: reserva.email || "",
+    habitacion: reserva.habitacion,
+    tipoHabitacion: habitacion?.tipo || "",
+    piso: habitacion?.piso || null,
+    precioNoche: reserva.precioNoche || habitacion?.precio || 0,
+    fechaCheckin: reserva.checkin,
+    fechaCheckout: reserva.checkout,
+    noches,
+    total: montoFinal,
+    metodoPago: pago.metodo,
+    valorPagado: montoFinal,
+    checkinPor: reserva.checkinPor || "—",
+    checkoutPor: quien(usuario),
+    observaciones: pago.observacion || "",
+    estadoFinalHabitacion: pago.estadoHab,
+    creadoEn: serverTimestamp(),
+  });
+
+  if (montoFinal > 0) {
+    batch.set(nuevoRef("ingresos"), {
+      descripcion: `Check-out ${reserva.nombre} — Hab. ${reserva.habitacion}`,
+      habitacion: reserva.habitacion,
+      monto: montoFinal,
+      metodo: pago.metodo,
+      reservaId: reserva.id,
+      registradoPor: quien(usuario),
+      fecha: serverTimestamp(),
+    });
+  }
+
+  if (reserva.clienteId) {
+    batch.set(ref("clientes", reserva.clienteId), { visitas: increment(1) }, { merge: true });
+  }
+
+  // Si sale antes de lo previsto, las noches siguientes quedan libres
+  liberarNoches(batch, reserva, hoyISO());
+  await batch.commit();
 };
 
 // ─── HABITACIONES ──────────────────────────────────────
-export const suscribirHabitaciones = (callback) => {
-  const q = query(
-    collection(db, "habitaciones"),
-    orderBy("numero")
+export const suscribirHabitaciones = (callback) =>
+  escuchar(query(col("habitaciones"), orderBy("numero")), callback);
+
+export const actualizarHabitacion = (id, datos) => updateDoc(ref("habitaciones", id), datos);
+
+const habitacionId = (numero) => `hab-${String(numero).trim()}`;
+
+/** Crea una o varias habitaciones; no sobrescribe números que ya existan. */
+export const crearHabitaciones = async (lista) => {
+  const refs = lista.map((h) => ref("habitaciones", habitacionId(h.numero)));
+  const existentes = await Promise.all(refs.map((r) => getDoc(r)));
+  const repetidas = lista.filter((_, i) => existentes[i].exists()).map((h) => h.numero);
+  if (repetidas.length) {
+    const err = new Error("REPETIDAS");
+    err.numeros = repetidas;
+    throw err;
+  }
+  const batch = writeBatch(db);
+  lista.forEach((h, i) =>
+    batch.set(refs[i], {
+      numero: String(h.numero).trim(),
+      tipo: h.tipo,
+      piso: Number(h.piso) || 1,
+      precio: Number(h.precio) || 0,
+      capacidad: Number(h.capacidad) || 2,
+      estado: "disponible",
+      activa: true,
+      creadoEn: serverTimestamp(),
+    })
   );
-
-  return onSnapshot(q, (snap) => {
-    const data = snap.docs.map((d) => ({
-      id: d.id,
-      ...d.data(),
-    }));
-
-    callback(data);
-  });
-};
-
-export const actualizarHabitacion = async (id, datos) => {
-  return await updateDoc(doc(db, "habitaciones", id), datos);
+  await batch.commit();
 };
 
 // ─── CLIENTES ──────────────────────────────────────────
-export const suscribirClientes = (callback) => {
-  const q = query(
-    collection(db, "clientes"),
-    orderBy("nombre")
-  );
+export const suscribirClientes = (callback) =>
+  escuchar(query(col("clientes"), orderBy("nombre")), callback);
 
-  return onSnapshot(q, (snap) => {
-    const data = snap.docs.map((d) => ({
-      id: d.id,
-      ...d.data(),
-    }));
-
-    callback(data);
-  });
-};
-
+/** Crea o actualiza el cliente usando su documento como identificador. */
 export const crearCliente = async (datos) => {
-  return await addDoc(collection(db, "clientes"), {
-    ...datos,
-    creadoEn: serverTimestamp(),
-    visitas: 0,
-  });
+  const id = clienteId(datos.documento);
+  const destino = id ? ref("clientes", id) : nuevoRef("clientes");
+  const existe = id ? (await getDoc(destino)).exists() : false;
+  await setDoc(
+    destino,
+    {
+      ...datos,
+      actualizadoEn: serverTimestamp(),
+      ...(existe ? {} : { creadoEn: serverTimestamp(), visitas: 0 }),
+    },
+    { merge: true }
+  );
+  return destino;
 };
 
-export const actualizarCliente = async (id, datos) => {
-  return await updateDoc(doc(db, "clientes", id), datos);
-};
+export const actualizarCliente = (id, datos) => updateDoc(ref("clientes", id), datos);
 
 // ─── ACCESOS (Vigilante) ───────────────────────────────
-export const registrarAcceso = async (datos) => {
-  return await addDoc(collection(db, "accesos"), {
-    ...datos,
-    hora: serverTimestamp(),
-  });
-};
+export const registrarAcceso = (datos) => crear("accesos", { ...datos, hora: serverTimestamp() });
 
-export const suscribirAccesos = (callback) => {
-  const q = query(
-    collection(db, "accesos"),
-    orderBy("hora", "desc")
-  );
+export const suscribirAccesos = (callback, dias = 60) =>
+  escuchar(query(col("accesos"), where("hora", ">=", haceDias(dias)), orderBy("hora", "desc")), callback);
 
-  return onSnapshot(q, (snap) => {
-    const data = snap.docs.map((d) => ({
-      id: d.id,
-      ...d.data(),
-    }));
+// ─── MOVIMIENTOS CON FECHA (ingresos, egresos, pagos) ──
+// Por defecto se descargan los últimos 400 días: suficiente para el mes,
+// el año y comparar con el año anterior, sin leer toda la historia.
+const crearConFecha = (nombre, datos) => crear(nombre, { ...datos, fecha: serverTimestamp() });
 
-    callback(data);
-  });
-};
+const suscribirConFecha = (nombre, callback, dias = 400) =>
+  escuchar(query(col(nombre), where("fecha", ">=", haceDias(dias)), orderBy("fecha", "desc")), callback);
 
-// ─── INGRESOS (Contador) ───────────────────────────────
-export const suscribirIngresos = (callback) => {
-  const q = query(
-    collection(db, "ingresos"),
-    orderBy("fecha", "desc")
-  );
+export const suscribirIngresos = (callback, dias) => suscribirConFecha("ingresos", callback, dias);
+export const registrarIngreso = (datos) => crearConFecha("ingresos", datos);
 
-  return onSnapshot(q, (snap) => {
-    const data = snap.docs.map((d) => ({
-      id: d.id,
-      ...d.data(),
-    }));
+export const suscribirEgresos = (callback, dias) => suscribirConFecha("egresos", callback, dias);
+export const registrarEgreso = (datos) => crearConFecha("egresos", datos);
 
-    callback(data);
-  });
-};
-
-export const registrarIngreso = async (datos) => {
-  return await addDoc(collection(db, "ingresos"), {
-    ...datos,
-    fecha: serverTimestamp(),
-  });
-};
+export const suscribirPagosEmpleados = (callback, dias) => suscribirConFecha("pagos_empleados", callback, dias);
+export const registrarPagoEmpleado = (datos) => crearConFecha("pagos_empleados", datos);
 
 // ─── HISTORIAL DE ESTANCIAS ────────────────────────────
-export const registrarHistorial = async (datos) => {
-  return await addDoc(collection(db, "historial_estancias"), {
-    ...datos,
-    creadoEn: serverTimestamp(),
-  });
-};
-
-export const suscribirHistorial = (callback) => {
-  const q = query(
-    collection(db, "historial_estancias"),
-    orderBy("creadoEn", "desc")
-  );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  });
-};
-
-// ─── EGRESOS ───────────────────────────────────────────
-export const registrarEgreso = async (datos) => {
-  return await addDoc(collection(db, "egresos"), {
-    ...datos,
-    fecha: serverTimestamp(),
-  });
-};
-
-export const suscribirEgresos = (callback) => {
-  const q = query(
-    collection(db, "egresos"),
-    orderBy("fecha", "desc")
-  );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  });
-};
-
-// ─── PAGOS A EMPLEADOS ─────────────────────────────────
-export const registrarPagoEmpleado = async (datos) => {
-  return await addDoc(collection(db, "pagos_empleados"), {
-    ...datos,
-    fecha: serverTimestamp(),
-  });
-};
-
-export const suscribirPagosEmpleados = (callback) => {
-  const q = query(
-    collection(db, "pagos_empleados"),
-    orderBy("fecha", "desc")
-  );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  });
-};
-
-// ─── ACTUALIZAR INGRESO ────────────────────────────────
-export const actualizarIngreso = async (id, datos) => {
-  return await updateDoc(doc(db, "ingresos", id), {
-    ...datos,
-    actualizadoEn: serverTimestamp(),
-  });
-};
-
-// ─── ACTUALIZAR EGRESO ─────────────────────────────────
-export const actualizarEgreso = async (id, datos) => {
-  return await updateDoc(doc(db, "egresos", id), {
-    ...datos,
-    actualizadoEn: serverTimestamp(),
-  });
-};
-
-// ─── ACTUALIZAR PAGO EMPLEADO ──────────────────────────
-export const actualizarPagoEmpleado = async (id, datos) => {
-  return await updateDoc(doc(db, "pagos_empleados", id), {
-    ...datos,
-    actualizadoEn: serverTimestamp(),
-  });
-};
+export const suscribirHistorial = (callback, max = 2000) =>
+  escuchar(query(col("historial_estancias"), orderBy("creadoEn", "desc"), limit(max)), callback);
 
 // ─── AUDITORÍA ─────────────────────────────────────────
-export const registrarAuditoria = async (datos) => {
-  return await addDoc(collection(db, "auditoria"), {
+const agregarAuditoria = (batch, datos, usuario) =>
+  batch.set(nuevoRef("auditoria"), {
     ...datos,
+    usuarioEmail: quien(usuario),
+    usuarioRol: usuario?.rol || "—",
     fecha: serverTimestamp(),
   });
-};
 
-export const suscribirAuditoria = (callback, maxItems = 200) => {
-  const q = query(
-    collection(db, "auditoria"),
-    orderBy("fecha", "desc"),
-    limit(maxItems)
+export const registrarAuditoria = (datos) => crear("auditoria", { ...datos, fecha: serverTimestamp() });
+
+export const suscribirAuditoria = (callback, maxItems = 200) =>
+  escuchar(query(col("auditoria"), orderBy("fecha", "desc"), limit(maxItems)), callback);
+
+/** Edita un movimiento y deja el registro de auditoría en la misma operación. */
+const actualizarConAuditoria = async (nombre, id, datosNuevos, datosAnteriores, usuario, descripcion) => {
+  const batch = writeBatch(db);
+  batch.update(ref(nombre, id), {
+    ...datosNuevos,
+    actualizadoPor: quien(usuario),
+    actualizadoEn: serverTimestamp(),
+  });
+  agregarAuditoria(
+    batch,
+    { entidad: nombre, entidadId: id, accion: "actualizar", antes: datosAnteriores, despues: datosNuevos, descripcion },
+    usuario
   );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  });
+  await batch.commit();
 };
 
-// Wrappers con auditoría automática
-export const actualizarIngresoConAuditoria = async (id, datosNuevos, datosAnteriores, usuario) => {
-  await actualizarIngreso(id, { ...datosNuevos, actualizadoPor: usuario?.email || "sistema" });
-  await registrarAuditoria({
-    entidad: "ingresos",
-    entidadId: id,
-    accion: "actualizar",
-    antes: datosAnteriores,
-    despues: datosNuevos,
-    usuarioEmail: usuario?.email || "sistema",
-    usuarioRol: usuario?.rol || "—",
-    descripcion: `Ingreso editado — ${datosNuevos.descripcion || id}`,
-  });
-};
+export const actualizarIngresoConAuditoria = (id, nuevos, anteriores, usuario) =>
+  actualizarConAuditoria("ingresos", id, nuevos, anteriores, usuario, `Ingreso editado — ${nuevos.descripcion || id}`);
 
-export const actualizarEgresoConAuditoria = async (id, datosNuevos, datosAnteriores, usuario) => {
-  await actualizarEgreso(id, { ...datosNuevos, actualizadoPor: usuario?.email || "sistema" });
-  await registrarAuditoria({
-    entidad: "egresos",
-    entidadId: id,
-    accion: "actualizar",
-    antes: datosAnteriores,
-    despues: datosNuevos,
-    usuarioEmail: usuario?.email || "sistema",
-    usuarioRol: usuario?.rol || "—",
-    descripcion: `Egreso editado — ${datosNuevos.concepto || id}`,
-  });
-};
+export const actualizarEgresoConAuditoria = (id, nuevos, anteriores, usuario) =>
+  actualizarConAuditoria("egresos", id, nuevos, anteriores, usuario, `Egreso editado — ${nuevos.concepto || id}`);
 
-export const actualizarPagoEmpleadoConAuditoria = async (id, datosNuevos, datosAnteriores, usuario) => {
-  await actualizarPagoEmpleado(id, { ...datosNuevos, actualizadoPor: usuario?.email || "sistema" });
-  await registrarAuditoria({
-    entidad: "pagos_empleados",
-    entidadId: id,
-    accion: "actualizar",
-    antes: datosAnteriores,
-    despues: datosNuevos,
-    usuarioEmail: usuario?.email || "sistema",
-    usuarioRol: usuario?.rol || "—",
-    descripcion: `Pago editado — ${datosNuevos.nombreEmpleado || id}`,
-  });
-};
+export const actualizarPagoEmpleadoConAuditoria = (id, nuevos, anteriores, usuario) =>
+  actualizarConAuditoria("pagos_empleados", id, nuevos, anteriores, usuario, `Pago editado — ${nuevos.nombreEmpleado || id}`);
 
 // ─── COMPROBANTES INTERNOS ─────────────────────────────
-export const crearComprobante = async (datos) => {
-  return await addDoc(collection(db, "comprobantes"), {
-    ...datos,
-    estado: "confirmado",
-    creadoEn: serverTimestamp(),
+const PREFIJOS = { ingreso: "ING", egreso: "EGR", pago_empleado: "PAG" };
+
+/**
+ * Crea un comprobante con consecutivo HST-ING-YYYYMM-0001.
+ * El número sale de un contador dentro de una transacción, así que
+ * dos usuarios al mismo tiempo nunca reciben el mismo.
+ */
+export const crearComprobante = async (datos, yyyymm) => {
+  const prefijo = PREFIJOS[datos.tipo] || "PAG";
+  const contadorRef = ref("contadores", `comprobante-${prefijo}-${yyyymm}`);
+  const compRef = nuevoRef("comprobantes");
+
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(contadorRef);
+    const siguiente = (snap.exists() ? snap.data().ultimo : 0) + 1;
+    const consecutivo = `HST-${prefijo}-${yyyymm}-${String(siguiente).padStart(4, "0")}`;
+    tx.set(contadorRef, { ultimo: siguiente });
+    tx.set(compRef, { ...datos, consecutivo, estado: "confirmado", creadoEn: serverTimestamp() });
+    return consecutivo;
   });
 };
 
-export const suscribirComprobantes = (callback) => {
-  const q = query(
-    collection(db, "comprobantes"),
-    orderBy("creadoEn", "desc")
-  );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  });
-};
+export const suscribirComprobantes = (callback) =>
+  escuchar(query(col("comprobantes"), orderBy("creadoEn", "desc")), callback);
 
 export const anularComprobante = async (id, motivo, usuario) => {
-  await updateDoc(doc(db, "comprobantes", id), {
+  const batch = writeBatch(db);
+  batch.update(ref("comprobantes", id), {
     estado: "anulado",
     motivoAnulacion: motivo,
-    anuladoPor: usuario?.email || "sistema",
+    anuladoPor: quien(usuario),
     anuladoEn: serverTimestamp(),
   });
-  await registrarAuditoria({
-    entidad: "comprobantes",
-    entidadId: id,
-    accion: "eliminar-logico",
-    antes: { estado: "confirmado" },
-    despues: { estado: "anulado", motivo },
-    usuarioEmail: usuario?.email || "sistema",
-    usuarioRol: usuario?.rol || "—",
-    descripcion: `Comprobante anulado — ${motivo}`,
-  });
+  agregarAuditoria(
+    batch,
+    {
+      entidad: "comprobantes",
+      entidadId: id,
+      accion: "eliminar-logico",
+      antes: { estado: "confirmado" },
+      despues: { estado: "anulado", motivo },
+      descripcion: `Comprobante anulado — ${motivo}`,
+    },
+    usuario
+  );
+  await batch.commit();
 };
 
 // ─── CAJAS DIARIAS ─────────────────────────────────────
-export const crearCajaDiaria = async (datos) => {
-  return await addDoc(collection(db, "cajas_diarias"), {
-    ...datos,
-    creadoEn: serverTimestamp(),
-  });
-};
+export const crearCajaDiaria = (datos) => crear("cajas_diarias", { ...datos, creadoEn: serverTimestamp() });
 
-export const actualizarCajaDiaria = async (id, datos) => {
-  return await updateDoc(doc(db, "cajas_diarias", id), {
-    ...datos,
-    actualizadoEn: serverTimestamp(),
-  });
-};
+export const actualizarCajaDiaria = (id, datos) =>
+  updateDoc(ref("cajas_diarias", id), { ...datos, actualizadoEn: serverTimestamp() });
 
-export const suscribirCajasDiarias = (callback) => {
-  const q = query(
-    collection(db, "cajas_diarias"),
-    orderBy("creadoEn", "desc")
-  );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  });
-};
+export const suscribirCajasDiarias = (callback) =>
+  escuchar(query(col("cajas_diarias"), orderBy("creadoEn", "desc"), limit(200)), callback);
 
 // ─── NOVEDADES ─────────────────────────────────────────
-export const registrarNovedad = async (datos) => {
-  return await addDoc(collection(db, "novedades"), {
-    ...datos,
-    estado: "abierta",
-    fecha: serverTimestamp(),
-  });
-};
+export const registrarNovedad = (datos) =>
+  crear("novedades", { ...datos, estado: "abierta", fecha: serverTimestamp() });
 
-export const actualizarNovedad = async (id, datos) => {
-  return await updateDoc(doc(db, "novedades", id), datos);
-};
+export const actualizarNovedad = (id, datos) => updateDoc(ref("novedades", id), datos);
 
-export const suscribirNovedades = (callback) => {
-  const q = query(
-    collection(db, "novedades"),
-    orderBy("fecha", "desc")
+export const suscribirNovedades = (callback) =>
+  escuchar(query(col("novedades"), orderBy("fecha", "desc"), limit(200)), callback);
+
+// ─── EMPLEADOS DEL HOTEL ───────────────────────────────
+export const suscribirEmpleados = (callback) =>
+  escuchar(
+    query(collection(db, "usuarios"), where("hotelId", "==", hotelId()), orderBy("creadoEn", "desc")),
+    callback
   );
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  });
-};
-
-// ─── SEMILLA: crear automáticamente 100 habitaciones (5 pisos × 20) ───
-export const seedHabitaciones = async () => {
-  const habitaciones = [];
-
-  for (let piso = 1; piso <= 5; piso++) {
-    for (let num = 1; num <= 20; num++) {
-      const numero = `${piso}${String(num).padStart(2, "0")}`;
-
-      habitaciones.push({
-        numero,
-        tipo:
-          num <= 5
-            ? "Suite"
-            : num <= 10
-            ? "Doble"
-            : num <= 15
-            ? "Estándar"
-            : "Simple",
-
-        piso,
-        estado: "disponible",
-
-        precio:
-          num <= 5
-            ? 450000
-            : num <= 10
-            ? 300000
-            : num <= 15
-            ? 220000
-            : 180000,
-      });
-    }
-  }
-
-  for (const hab of habitaciones) {
-    await setDoc(
-      doc(db, "habitaciones", `hab-${hab.numero}`),
-      hab
-    );
-  }
-
-  console.log("✅ 100 habitaciones creadas en Firestore (5 pisos × 20)");
-};
-
-// ─── LIMPIEZA: eliminar ingresos anteriores a hoy ──────
-export const eliminarIngresosAnteriores = async () => {
-  const snap = await getDocs(collection(db, "ingresos"));
-  const hoy = new Date().toDateString();
-  const aEliminar = snap.docs.filter((d) => {
-    const f = d.data().fecha;
-    const date = f?.toDate ? f.toDate() : f ? new Date(f) : null;
-    return !date || date.toDateString() !== hoy;
-  });
-  for (let i = 0; i < aEliminar.length; i += 400) {
-    const batch = writeBatch(db);
-    aEliminar.slice(i, i + 400).forEach((d) => batch.delete(doc(db, "ingresos", d.id)));
-    await batch.commit();
-  }
-  return aEliminar.length;
-};
-
-// ─── LIMPIEZA: eliminar egresos anteriores a hoy ───────
-export const eliminarEgresosAnteriores = async () => {
-  const snap = await getDocs(collection(db, "egresos"));
-  const hoy = new Date().toDateString();
-  const aEliminar = snap.docs.filter((d) => {
-    const f = d.data().fecha;
-    const date = f?.toDate ? f.toDate() : f ? new Date(f) : null;
-    return !date || date.toDateString() !== hoy;
-  });
-  for (let i = 0; i < aEliminar.length; i += 400) {
-    const batch = writeBatch(db);
-    aEliminar.slice(i, i + 400).forEach((d) => batch.delete(doc(db, "egresos", d.id)));
-    await batch.commit();
-  }
-  return aEliminar.length;
-};
