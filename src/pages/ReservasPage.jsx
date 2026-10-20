@@ -46,7 +46,7 @@ const fmtMoney = (n) =>
 
 export default function ReservasPage() {
   const { reservas, loading } = useReservas();
-  const { habitaciones } = useHabitaciones();
+  const { habitaciones, loading: cargandoHabs } = useHabitaciones();
   const { usuario } = useAuth();
   const { toast, ToastContainer } = useToast();
 
@@ -310,6 +310,8 @@ export default function ReservasPage() {
                       <option value="">
                         {!form.checkin || !form.checkout
                           ? "Elige primero las fechas"
+                          : cargandoHabs
+                          ? "Cargando habitaciones..."
                           : disponibles.length
                           ? "Seleccionar..."
                           : "No hay habitaciones libres en esas fechas"}

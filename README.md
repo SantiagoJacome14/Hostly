@@ -13,10 +13,10 @@ Sistema de gestión hotelera para hoteles pequeños y medianos en Colombia: rese
    cp .env.example .env   # en Windows: copy .env.example .env
    ```
    Pega en `.env` los valores de *Configuración del proyecto → Tus apps*.
-3. Sube las reglas de seguridad y los índices:
+3. Instala la herramienta de Firebase (una sola vez: `npm install -g firebase-tools`) y sube las reglas de seguridad y los índices:
    ```bash
-   npx firebase login
-   npx firebase use --add      # elige tu proyecto, alias "default"
+   firebase login
+   firebase use --add          # elige tu proyecto, alias "default"
    npm run reglas:subir
    ```
 4. Arranca la app y registra el hotel:
