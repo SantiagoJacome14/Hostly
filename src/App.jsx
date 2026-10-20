@@ -23,11 +23,14 @@ import PagosEmpleadosPage from "./pages/PagosEmpleadosPage";
 import UsuariosPage from "./pages/UsuariosPage";
 import AuditoriaPage from "./pages/AuditoriaPage";
 import InformesContablesPage from "./pages/InformesContablesPage";
+import CalendarioPage from "./pages/CalendarioPage";
+import ConfiguracionPage from "./pages/ConfiguracionPage";
 
 // Rutas permitidas por rol
 const ROL_RUTAS = {
   admin: [
     "/",
+    "/calendario",
     "/reservas",
     "/checkin",
     "/checkout",
@@ -42,10 +45,12 @@ const ROL_RUTAS = {
     "/usuarios",
     "/auditoria",
     "/informes-contables",
+    "/configuracion",
   ],
 
   recepcionista: [
     "/",
+    "/calendario",
     "/reservas",
     "/checkin",
     "/checkout",
@@ -95,11 +100,28 @@ const ProtectedRoute = ({ children, ruta }) => {
   return children;
 };
 
+const SinAcceso = () => {
+  const { logout } = useAuth();
+  return (
+    <div className="loading-screen" style={{ flexDirection: "column", gap: 14, textAlign: "center", padding: 24 }}>
+      <div>Tu cuenta no tiene acceso a ningún hotel</div>
+      <div style={{ fontFamily: "Inter, sans-serif", fontSize: 13, color: "var(--muted)", letterSpacing: 0 }}>
+        Puede estar desactivada. Habla con el administrador del hotel.
+      </div>
+      <button className="btn btn-outline btn-sm" onClick={logout}>Cerrar sesión</button>
+    </div>
+  );
+};
+
 export default function App() {
-  const { usuario, loading } = useAuth();
+  const { usuario, loading, sinAcceso } = useAuth();
 
   if (loading) {
     return <div className="loading-screen">Iniciando Hostly...</div>;
+  }
+
+  if (sinAcceso) {
+    return <SinAcceso />;
   }
 
   if (!usuario) {
@@ -126,6 +148,7 @@ export default function App() {
         />
 
         {/* Recepcionista + Admin */}
+        <Route path="calendario" element={<ProtectedRoute ruta="/calendario"><CalendarioPage /></ProtectedRoute>} />
         <Route path="reservas" element={<ProtectedRoute ruta="/reservas"><ReservasPage /></ProtectedRoute>} />
         <Route path="checkin" element={<ProtectedRoute ruta="/checkin"><CheckinPage /></ProtectedRoute>} />
         <Route path="checkout" element={<ProtectedRoute ruta="/checkout"><CheckoutPage /></ProtectedRoute>} />
@@ -147,6 +170,7 @@ export default function App() {
 
         {/* Admin exclusivo */}
         <Route path="usuarios" element={<ProtectedRoute ruta="/usuarios"><UsuariosPage /></ProtectedRoute>} />
+        <Route path="configuracion" element={<ProtectedRoute ruta="/configuracion"><ConfiguracionPage /></ProtectedRoute>} />
 
         {/* Admin + Contador */}
         <Route path="auditoria" element={<ProtectedRoute ruta="/auditoria"><AuditoriaPage /></ProtectedRoute>} />

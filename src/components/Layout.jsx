@@ -7,9 +7,6 @@ import { useNavigate, useLocation, Outlet } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import toast from "react-hot-toast";
 
-// Rutas donde se muestra el botón "Nueva reserva"
-const RUTAS_RESERVA = ["/reservas", "/", "/checkin", "/checkout"];
-
 // Navegación permitida por rol
 const NAV_POR_ROL = {
   admin: [
@@ -22,6 +19,7 @@ const NAV_POR_ROL = {
     {
       section: "Operación",
       items: [
+        { path: "/calendario",  icon: "▥",  label: "Calendario" },
         { path: "/reservas",    icon: "📅", label: "Reservas",         badge: "live" },
         { path: "/checkin",     icon: "↘",  label: "Check-in" },
         { path: "/checkout",    icon: "↗",  label: "Check-out" },
@@ -51,6 +49,7 @@ const NAV_POR_ROL = {
       items: [
         { path: "/accesos",  icon: "◈", label: "Control acceso", badge: "live" },
         { path: "/usuarios", icon: "◉", label: "Usuarios / empleados" },
+        { path: "/configuracion", icon: "⚙", label: "Configuración" },
       ],
     },
   ],
@@ -65,6 +64,7 @@ const NAV_POR_ROL = {
     {
       section: "Gestión",
       items: [
+        { path: "/calendario",  icon: "▥",  label: "Calendario" },
         { path: "/reservas",    icon: "📅", label: "Reservas",    badge: "live" },
         { path: "/checkin",     icon: "↘",  label: "Check-in" },
         { path: "/checkout",    icon: "↗",  label: "Check-out" },
@@ -156,7 +156,7 @@ const LABELS_ROL = {
 };
 
 export default function Layout() {
-  const { usuario, rol, logout } = useAuth();
+  const { usuario, rol, hotel, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -174,10 +174,6 @@ export default function Layout() {
       .flatMap((sec) => sec.items)
       .find((item) => item.path === location.pathname)?.label || "Hostly";
 
-  const puedeReservar = RUTAS_RESERVA.some(r =>
-    (rol === "admin" || rol === "recepcionista")
-  );
-
   return (
     <div style={s.app}>
       {/* ───────── SIDEBAR ───────── */}
@@ -188,7 +184,7 @@ export default function Layout() {
             <div style={s.logoIcon}>H</div>
             <div>
               <div style={s.logoText}>Hostly</div>
-              <div style={s.logoSub}>Hotel Management</div>
+              <div style={s.logoSub} title={hotel?.nombre}>{hotel?.nombre || "Hotel Management"}</div>
             </div>
           </div>
         </div>
@@ -242,11 +238,11 @@ export default function Layout() {
           </div>
 
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={s.sfName}>
-              {LABELS_ROL[rolActual] || rolActual}
+            <div style={s.sfName} title={usuario?.email}>
+              {usuario?.nombre || LABELS_ROL[rolActual] || rolActual}
             </div>
             <div style={{ ...s.sfRole, color: "#6B6660" }}>
-              Sesión activa
+              {LABELS_ROL[rolActual] || rolActual}
             </div>
           </div>
 
@@ -282,7 +278,7 @@ export default function Layout() {
           {(rolActual === "admin" || rolActual === "recepcionista") && (
             <button
               style={s.btnGold}
-              onClick={() => navigate("/reservas")}
+              onClick={() => navigate("/reservas?nueva=1")}
             >
               + Nueva reserva
             </button>
@@ -359,6 +355,10 @@ const s = {
     letterSpacing: "0.14em",
     textTransform: "uppercase",
     marginTop: 2,
+    maxWidth: 130,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
 
   nav: {

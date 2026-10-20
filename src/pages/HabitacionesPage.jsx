@@ -3,10 +3,13 @@ import { useHabitaciones } from "../hooks/useHabitaciones.jsx";
 import { useReservas } from "../hooks/useReservas.jsx";
 import { actualizarHabitacion } from "../firebase/firestore";
 import { useToast } from "../hooks/useToast.jsx";
+import { esActiva, hoyISO } from "../utils/disponibilidad";
 
-const ESTADOS = ["ocupada","disponible","limpieza","reservada"];
-const ESTADO_LABEL = { ocupada:"Ocupada", disponible:"Disponible", limpieza:"Limpieza", reservada:"Reservada" };
-const BADGE = { ocupada:"b-red", disponible:"b-green", limpieza:"b-amber", reservada:"b-blue" };
+// "reservada" no se guarda: se muestra cuando alguien llega hoy a una habitación libre
+const ESTADOS = ["ocupada","disponible","limpieza","reservada","mantenimiento"];
+const ESTADOS_FISICOS = ["disponible","ocupada","limpieza","mantenimiento"];
+const ESTADO_LABEL = { ocupada:"Ocupada", disponible:"Disponible", limpieza:"Limpieza", reservada:"Llega hoy", mantenimiento:"Mantenimiento" };
+const BADGE = { ocupada:"b-red", disponible:"b-green", limpieza:"b-amber", reservada:"b-blue", mantenimiento:"b-gray" };
 
 export default function HabitacionesPage() {
   const { habitaciones, loading } = useHabitaciones();
@@ -15,12 +18,12 @@ export default function HabitacionesPage() {
   const [selected, setSelected] = useState(null);
   const [filtro, setFiltro] = useState("todas");
 
+  // Reserva en curso o la próxima llegada de la habitación
+  const hoy = hoyISO();
   const getReservaActiva = (numero) =>
-    reservas.find(
-      (r) =>
-        r.habitacion === numero &&
-        (r.estado === "confirmada" || r.estado === "pendiente" || r.estado === "checkin")
-    );
+    reservas
+      .filter((r) => r.habitacion === numero && esActiva(r) && r.checkout > hoy)
+      .sort((a, b) => a.checkin.localeCompare(b.checkin))[0];
 
 
   const counts = ESTADOS.reduce((acc, e) => ({ ...acc, [e]: habitaciones.filter(h => h.estado === e).length }), {});
@@ -57,9 +60,10 @@ export default function HabitacionesPage() {
                   ["Estado actual", <span className={`badge ${BADGE[selected.estado]}`}>{ESTADO_LABEL[selected.estado]}</span>],
                   ["Tipo", selected.tipo],
                   ["Piso", `Piso ${selected.piso}`],
-                  ["Precio/noche", `$${(selected.precio/1000).toFixed(0)}K COP`],
+                  ["Precio/noche", new Intl.NumberFormat("es-CO", { style:"currency", currency:"COP", maximumFractionDigits:0 }).format(selected.precio || 0)],
                 ];
                 if (res) {
+                  if (res.checkin > hoy) filas.push(["Próxima llegada", res.checkin]);
                   filas.push(["Reservado por", <strong style={{ color:"var(--white)" }}>{res.nombre}</strong>]);
                   if (res.documento) filas.push(["Cédula", res.documento]);
                   if (res.telefono) filas.push(["Teléfono / WhatsApp", <span style={{ color:"var(--green)", fontWeight:700 }}>📱 {res.telefono}</span>]);
@@ -78,7 +82,7 @@ export default function HabitacionesPage() {
               <div style={{ marginTop:18 }}>
                 <div style={{ fontSize:10, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:10 }}>Cambiar estado</div>
                 <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  {ESTADOS.filter(e => e !== selected.estado).map(e => (
+                  {ESTADOS_FISICOS.filter(e => e !== selected.estadoFisico).map(e => (
                     <button key={e} className={`btn btn-sm badge ${BADGE[e]}`} style={{ cursor:"pointer", fontWeight:600 }} onClick={() => cambiarEstado(selected, e)}>
                       → {ESTADO_LABEL[e]}
                     </button>
@@ -99,7 +103,7 @@ export default function HabitacionesPage() {
           { lbl:"Ocupadas",   val:counts.ocupada,    color:"var(--red)",   e:"ocupada" },
           { lbl:"Disponibles",val:counts.disponible, color:"var(--green)", e:"disponible" },
           { lbl:"En limpieza",val:counts.limpieza,   color:"var(--amber)", e:"limpieza" },
-          { lbl:"Reservadas", val:counts.reservada,  color:"var(--blue)",  e:"reservada" },
+          { lbl:"Llegan hoy", val:counts.reservada,  color:"var(--blue)",  e:"reservada" },
         ].map(s => (
           <div key={s.lbl} className="stat-card" style={{ cursor:"pointer" }} onClick={() => setFiltro(filtro === s.e ? "todas" : s.e)}>
             <div className="stat-lbl">{s.lbl}</div>
@@ -114,7 +118,7 @@ export default function HabitacionesPage() {
           <div className="panel-title">Mapa de habitaciones</div>
           <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
             <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
-              {[{c:"rgba(231,76,60,0.5)",l:"Ocupada"},{c:"rgba(46,204,113,0.5)",l:"Libre"},{c:"rgba(243,156,18,0.5)",l:"Limpieza"},{c:"rgba(52,152,219,0.5)",l:"Reservada"}].map(x=>(
+              {[{c:"rgba(231,76,60,0.5)",l:"Ocupada"},{c:"rgba(46,204,113,0.5)",l:"Libre"},{c:"rgba(243,156,18,0.5)",l:"Limpieza"},{c:"rgba(52,152,219,0.5)",l:"Llega hoy"},{c:"rgba(255,255,255,0.2)",l:"Mantenimiento"}].map(x=>(
                 <div key={x.l} style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"var(--muted)" }}>
                   <div style={{ width:8,height:8,borderRadius:2,background:x.c }} />{x.l}
                 </div>
@@ -126,7 +130,7 @@ export default function HabitacionesPage() {
         <div className="panel-body">
           {loading ? <div style={{ textAlign:"center", padding:24, color:"var(--muted)" }}>Cargando habitaciones...</div> : (
             <>
-              {[1,2,3,4,5].map(piso => {
+              {[...new Set(filtradas.map(h => h.piso))].sort((a, b) => a - b).map(piso => {
                 const pisoHabs = filtradas.filter(h => h.piso === piso);
                 if (!pisoHabs.length) return null;
                 return (

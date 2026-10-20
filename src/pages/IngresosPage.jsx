@@ -3,7 +3,6 @@ import {
   suscribirIngresos,
   registrarIngreso,
   actualizarIngresoConAuditoria,
-  eliminarIngresosAnteriores,
 } from "../firebase/firestore";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../hooks/useToast.jsx";
@@ -115,8 +114,6 @@ export default function IngresosPage() {
   const { toast, ToastContainer }   = useToast();
   const [form, setForm]             = useState(FORM_VACIO);
   const [formEdit, setFormEdit]     = useState(FORM_VACIO);
-  const [confirmarLimpiar, setConfirmarLimpiar] = useState(false);
-  const [limpiando, setLimpiando]   = useState(false);
 
   useEffect(() => {
     const unsub = suscribirIngresos((data) => { setIngresos(data); setLoading(false); });
@@ -159,19 +156,6 @@ export default function IngresosPage() {
     setModalEditar(null);
   };
 
-  const handleLimpiarAnteriores = async () => {
-    setLimpiando(true);
-    try {
-      const n = await eliminarIngresosAnteriores();
-      toast(n > 0 ? `${n} ingresos anteriores eliminados ✓` : "No había ingresos de días anteriores");
-    } catch (err) {
-      toast("Error al limpiar ingresos");
-    } finally {
-      setLimpiando(false);
-      setConfirmarLimpiar(false);
-    }
-  };
-
   const handleExportarCSV = () => {
     const ok = exportCsv({
       filename: `ingresos_hostly_${new Date().toISOString().slice(0, 10)}.csv`,
@@ -191,40 +175,6 @@ export default function IngresosPage() {
   return (
     <>
       <ToastContainer />
-
-      {confirmarLimpiar && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setConfirmarLimpiar(false)}>
-          <div className="modal" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div className="modal-title" style={{ color: "var(--red)" }}>Eliminar ingresos anteriores</div>
-              <button type="button" className="modal-close" onClick={() => setConfirmarLimpiar(false)}>✕</button>
-            </div>
-            <div className="modal-body">
-              <div className="notif notif-red">
-                <span className="notif-icon">⚠️</span>
-                <div>
-                  <div className="notif-title">Esta acción es irreversible</div>
-                  <div className="notif-text">
-                    Se eliminarán <strong>todos los ingresos de días anteriores</strong>. Solo quedarán los registrados hoy ({new Date().toLocaleDateString("es-CO")}).
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button type="button" className="btn btn-outline btn-sm" onClick={() => setConfirmarLimpiar(false)}>Cancelar</button>
-              <button
-                type="button"
-                className="btn btn-sm"
-                style={{ background: "rgba(231,76,60,0.15)", color: "var(--red)", border: "1px solid rgba(231,76,60,0.3)", borderRadius: 8 }}
-                onClick={handleLimpiarAnteriores}
-                disabled={limpiando}
-              >
-                {limpiando ? "Eliminando..." : "Sí, eliminar anteriores"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {modalCrear && (
         <ModalIngresoForm
@@ -270,13 +220,6 @@ export default function IngresosPage() {
           <div className="panel-title">Registro de ingresos</div>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn btn-ghost btn-sm" onClick={handleExportarCSV}>↓ CSV</button>
-            <button
-              className="btn btn-sm"
-              style={{ background: "rgba(231,76,60,0.08)", color: "var(--red)", border: "1px solid rgba(231,76,60,0.2)", borderRadius: 8 }}
-              onClick={() => setConfirmarLimpiar(true)}
-            >
-              Limpiar anteriores
-            </button>
             <button className="btn btn-gold btn-sm" onClick={() => setModalCrear(true)}>+ Registrar</button>
           </div>
         </div>

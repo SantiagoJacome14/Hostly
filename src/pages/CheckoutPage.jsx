@@ -2,13 +2,9 @@ import { useState } from "react";
 import { useReservas } from "../hooks/useReservas.jsx";
 import { useHabitaciones } from "../hooks/useHabitaciones.jsx";
 import { useAuth } from "../context/AuthContext";
-import {
-  actualizarReserva,
-  actualizarHabitacion,
-  registrarHistorial,
-  registrarIngreso,
-} from "../firebase/firestore";
+import { hacerCheckout } from "../firebase/firestore";
 import { useToast } from "../hooks/useToast.jsx";
+import { contarNoches as calcNight } from "../utils/disponibilidad";
 
 const initials = (n) =>
   n?.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "??";
@@ -17,12 +13,6 @@ const fmtMoney = (n) =>
   new Intl.NumberFormat("es-CO", {
     style: "currency", currency: "COP", maximumFractionDigits: 0,
   }).format(n || 0);
-
-const calcNight = (ci, co) => {
-  if (!ci || !co) return 0;
-  const diff = new Date(co) - new Date(ci);
-  return Math.max(0, Math.round(diff / 86400000));
-};
 
 export default function CheckoutPage() {
   const { reservas } = useReservas();
@@ -60,60 +50,8 @@ export default function CheckoutPage() {
     try {
       const res = modalCO;
       const hab = habitaciones.find((h) => h.numero === res.habitacion);
-      const noches = calcNight(res.checkin, res.checkout);
-      const montoFinal = Number(formCO.monto) || 0;
-
-      // 1. Actualizar reserva
-      await actualizarReserva(res.id, {
-        estado: "checkout",
-        checkoutPor: usuario?.email || "sistema",
-        metodoPago: formCO.metodo,
-        montoPagado: montoFinal,
-        observacionCheckout: formCO.observacion,
-      });
-
-      // 2. Actualizar habitación
-      if (hab) {
-        await actualizarHabitacion(hab.id, {
-          estado: formCO.estadoHab,
-          huesped: null,
-        });
-      }
-
-      // 3. Registrar en historial de estancias
-      await registrarHistorial({
-        reservaId:   res.id,
-        nombre:      res.nombre,
-        documento:   res.documento || "",
-        email:       res.email || "",
-        habitacion:  res.habitacion,
-        tipoHabitacion: hab?.tipo || "",
-        piso:        hab?.piso || null,
-        precioNoche: res.precioNoche || hab?.precio || 0,
-        fechaCheckin:  res.checkin,
-        fechaCheckout: res.checkout,
-        noches,
-        total:        montoFinal,
-        metodoPago:   formCO.metodo,
-        valorPagado:  montoFinal,
-        checkinPor:   res.checkinPor || "—",
-        checkoutPor:  usuario?.email || "sistema",
-        observaciones: formCO.observacion,
-        estadoFinalHabitacion: formCO.estadoHab,
-      });
-
-      // 4. Registrar ingreso automáticamente
-      if (montoFinal > 0) {
-        await registrarIngreso({
-          descripcion: `Check-out ${res.nombre} — Hab. ${res.habitacion}`,
-          habitacion:  res.habitacion,
-          monto:       montoFinal,
-          metodo:      formCO.metodo,
-          reservaId:   res.id,
-          registradoPor: usuario?.email || "sistema",
-        });
-      }
-
+      // Todo en una sola operación: si algo falla no queda nada a medias
+      await hacerCheckout(res, hab, formCO, usuario);
       toast(`Check-out completado — Hab. ${res.habitacion} en ${formCO.estadoHab}`);
       setModalCO(null);
     } catch (err) {

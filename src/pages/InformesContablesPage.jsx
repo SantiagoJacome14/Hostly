@@ -15,11 +15,6 @@ import { useToast } from "../hooks/useToast.jsx";
 const fmtFecha = (ts) =>
   toDateSafe(ts)?.toLocaleDateString("es-CO", { day: "2-digit", month: "short", year: "numeric" }) || "—";
 
-const generarConsecutivo = (tipo, yyyymm, posicion) => {
-  const prefix = tipo === "ingreso" ? "ING" : tipo === "egreso" ? "EGR" : "PAG";
-  return `HST-${prefix}-${yyyymm}-${String(posicion).padStart(4, "0")}`;
-};
-
 const TABS = [
   { id: "comprobantes",  label: "Comprobantes" },
   { id: "crear",         label: "Crear comprobante" },
@@ -64,13 +59,8 @@ export default function InformesContablesPage() {
     if (!form.monto || Number(form.monto) <= 0) { toast("El monto debe ser positivo"); return; }
     setCreando(true);
     try {
-      const yyyymm = currentYYYYMM();
-      const tipoComp = form.tipo;
-      const posicion = comprobantes.filter((c) => c.tipo === tipoComp && c.consecutivo?.includes(yyyymm)).length + 1;
-      const consecutivo = generarConsecutivo(tipoComp, yyyymm, posicion);
-
-      await crearComprobante({
-        consecutivo,
+      // El consecutivo lo asigna la base de datos (nunca se repite)
+      const consecutivo = await crearComprobante({
         tipo:           form.tipo,
         tercero:        form.tercero,
         documento:      form.documento,
@@ -82,7 +72,7 @@ export default function InformesContablesPage() {
         registradoPor:  usuario?.email || "sistema",
         origenColeccion: null,
         origenId:       null,
-      });
+      }, currentYYYYMM());
       toast(`Comprobante ${consecutivo} creado ✓`);
       setForm({ tipo: "ingreso", tercero: "", documento: "", concepto: "", metodo: "Efectivo", monto: "", observaciones: "", referencia: "" });
       setTab("comprobantes");

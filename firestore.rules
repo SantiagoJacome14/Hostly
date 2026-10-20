@@ -1,0 +1,180 @@
+rules_version = '2';
+
+// ============================================================
+//  HOSTLY — Reglas de seguridad de Firestore
+//  Cada hotel solo ve sus propios datos y cada rol solo lo suyo.
+//  Subir con: firebase deploy --only firestore
+// ============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function autenticado() {
+      return request.auth != null;
+    }
+
+    function perfilRef() {
+      return /databases/$(database)/documents/usuarios/$(request.auth.uid);
+    }
+
+    function perfil() {
+      return get(perfilRef()).data;
+    }
+
+    // Usuario activo que pertenece al hotel
+    function miembro(hid) {
+      return autenticado()
+        && exists(perfilRef())
+        && perfil().hotelId == hid
+        && perfil().activo == true;
+    }
+
+    function tieneRol(hid, roles) {
+      return miembro(hid) && perfil().rol in roles;
+    }
+
+    function rolValido(r) {
+      return r in ['admin', 'recepcionista', 'servicio', 'contador', 'vigilante'];
+    }
+
+    function soloCambia(campos) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(campos);
+    }
+
+    // ─── Perfiles de usuario ─────────────────────────────
+    match /usuarios/{uid} {
+      allow get: if autenticado()
+        && (request.auth.uid == uid || tieneRol(resource.data.hotelId, ['admin']));
+
+      allow list: if tieneRol(resource.data.hotelId, ['admin']);
+
+      allow create: if autenticado()
+        && request.resource.data.keys().hasAll(['nombre', 'email', 'rol', 'hotelId', 'activo'])
+        && rolValido(request.resource.data.rol)
+        && request.resource.data.activo == true
+        && (
+          // El dueño registrando su propio hotel (en el mismo lote que crea el hotel)
+          (request.auth.uid == uid
+            && request.resource.data.rol == 'admin'
+            && getAfter(/databases/$(database)/documents/hoteles/$(request.resource.data.hotelId)).data.ownerUid == uid)
+          // O un admin creando un empleado de su hotel
+          || tieneRol(request.resource.data.hotelId, ['admin'])
+        );
+
+      // El admin edita empleados de su hotel; no puede quitarse a sí mismo el rol ni desactivarse
+      allow update: if tieneRol(resource.data.hotelId, ['admin'])
+        && request.resource.data.hotelId == resource.data.hotelId
+        && rolValido(request.resource.data.rol)
+        && (uid != request.auth.uid
+            || (request.resource.data.rol == 'admin' && request.resource.data.activo == true));
+
+      allow delete: if false;
+    }
+
+    // ─── Hoteles ─────────────────────────────────────────
+    match /hoteles/{hid} {
+      allow create: if autenticado()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.plan == 'prueba';
+
+      allow read: if miembro(hid);
+
+      // El plan y el vencimiento solo los cambia Hostly, no el hotel
+      allow update: if tieneRol(hid, ['admin'])
+        && !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['ownerUid', 'plan', 'venceEn']);
+
+      allow delete: if false;
+
+      function puede(roles) {
+        return tieneRol(hid, roles);
+      }
+
+      match /habitaciones/{id} {
+        allow read: if miembro(hid);
+        allow create: if puede(['admin']);
+        allow update: if puede(['admin'])
+          || (puede(['recepcionista', 'servicio']) && soloCambia(['estado', 'huesped']));
+        allow delete: if false;
+      }
+
+      match /reservas/{id} {
+        allow read: if miembro(hid);
+        allow create, update: if puede(['admin', 'recepcionista']);
+        allow delete: if false;
+      }
+
+      // Una noche ocupada de una habitación: evita sobreventas
+      match /ocupacion/{id} {
+        allow read: if miembro(hid);
+        allow create, delete: if puede(['admin', 'recepcionista']);
+        allow update: if false;
+      }
+
+      match /clientes/{id} {
+        allow read, create, update: if puede(['admin', 'recepcionista']);
+        allow delete: if false;
+      }
+
+      match /historial_estancias/{id} {
+        allow read: if puede(['admin', 'recepcionista', 'contador']);
+        allow create: if puede(['admin', 'recepcionista']);
+        allow update, delete: if false;
+      }
+
+      // ─── Finanzas: nada se borra, todo queda auditado ───
+      match /ingresos/{id} {
+        allow read, update: if puede(['admin', 'contador']);
+        allow create: if puede(['admin', 'contador', 'recepcionista']);
+        allow delete: if false;
+      }
+
+      match /egresos/{id} {
+        allow read, create, update: if puede(['admin', 'contador']);
+        allow delete: if false;
+      }
+
+      match /pagos_empleados/{id} {
+        allow read, create, update: if puede(['admin', 'contador']);
+        allow delete: if false;
+      }
+
+      match /comprobantes/{id} {
+        allow read, create: if puede(['admin', 'contador']);
+        // Solo se pueden anular, nunca editar ni borrar
+        allow update: if puede(['admin', 'contador'])
+          && resource.data.estado == 'confirmado'
+          && request.resource.data.estado == 'anulado'
+          && soloCambia(['estado', 'motivoAnulacion', 'anuladoPor', 'anuladoEn']);
+        allow delete: if false;
+      }
+
+      match /contadores/{id} {
+        allow read, create, update: if puede(['admin', 'contador']);
+        allow delete: if false;
+      }
+
+      match /auditoria/{id} {
+        allow read: if puede(['admin', 'contador']);
+        allow create: if miembro(hid);
+        allow update, delete: if false;
+      }
+
+      match /cajas_diarias/{id} {
+        allow read, create, update: if puede(['admin', 'recepcionista', 'contador']);
+        allow delete: if false;
+      }
+
+      // ─── Seguridad y servicio ───
+      match /accesos/{id} {
+        allow read, create, update: if puede(['admin', 'vigilante']);
+        allow delete: if false;
+      }
+
+      match /novedades/{id} {
+        allow read, create, update: if miembro(hid);
+        allow delete: if false;
+      }
+    }
+  }
+}
