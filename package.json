@@ -8,7 +8,8 @@
     "preview": "vite preview",
     "test": "vitest run tests/disponibilidad.test.js",
     "test:reglas": "firebase emulators:exec --only firestore --project demo-hostly \"vitest run tests/reglas.test.js\"",
-    "reglas:subir": "firebase deploy --only firestore"
+    "reglas:subir": "firebase deploy --only firestore",
+    "publicar": "vite build && firebase deploy --only hosting"
   },
   "dependencies": {
     "firebase": "^12.19.0",

@@ -33,6 +33,7 @@ Sistema de gestión hotelera para hoteles pequeños y medianos en Colombia: rese
 | `npm run build` | Compila para producción en `dist/` |
 | `npm test` | Pruebas de fechas y disponibilidad |
 | `npm run test:reglas` | Pruebas de reglas de seguridad y flujos contra el emulador de Firestore (requiere Java 11+) |
+| `npm run publicar` | Compila y publica la app en `https://TU-PROYECTO.web.app` (Firebase Hosting) |
 | `npm run reglas:subir` | Sube `firestore.rules` y `firestore.indexes.json` a tu proyecto |
 
 ## Cómo están organizados los datos
